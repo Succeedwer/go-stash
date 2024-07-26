@@ -23,6 +23,7 @@ type (
 		Compress      bool   `json:",default=false"`
 		Username      string `json:",optional"`
 		Password      string `json:",optional"`
+		Certs         string `json:",optional"`
 	}
 
 	Filter struct {

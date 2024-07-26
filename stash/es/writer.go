@@ -1,10 +1,14 @@
 package es
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"github.com/elastic/go-elasticsearch/v8"
+	"os"
+	"strings"
 
 	"github.com/kevwan/go-stash/stash/config"
-	"github.com/olivere/elastic/v7"
 	"github.com/rogpeppe/go-internal/semver"
 	"github.com/zeromicro/go-zero/core/executors"
 	"github.com/zeromicro/go-zero/core/logx"
@@ -16,7 +20,7 @@ type (
 	Writer struct {
 		docType   string
 		esVersion string
-		client    *elastic.Client
+		client    *elasticsearch.Client
 		inserter  *executors.ChunkExecutor
 	}
 
@@ -27,19 +31,39 @@ type (
 )
 
 func NewWriter(c config.ElasticSearchConf) (*Writer, error) {
-	client, err := elastic.NewClient(
-		elastic.SetSniff(false),
-		elastic.SetURL(c.Hosts...),
-		elastic.SetGzip(c.Compress),
-		elastic.SetBasicAuth(c.Username, c.Password),
-	)
+
+	var cert []byte
+	if c.Certs != "" {
+		var err error
+		cert, err = os.ReadFile(c.Certs)
+		if err != nil {
+			logx.Errorf("ERROR: Unable to  read CA from %q: %s", c.Certs, err)
+		}
+	}
+	client, err := elasticsearch.NewClient(elasticsearch.Config{
+		Addresses:           c.Hosts,
+		Username:            c.Username,
+		Password:            c.Password,
+		CACert:              cert,
+		CompressRequestBody: true,
+	})
+	logx.Must(err)
 	if err != nil {
 		return nil, err
 	}
 
-	version, err := client.ElasticsearchVersion(c.Hosts[0])
 	if err != nil {
 		return nil, err
+	}
+
+	resp, err := client.Cat.Nodes(client.Cat.Nodes.WithV(true))
+	if err != nil {
+		return nil, err
+	}
+	version := strings.Split(resp.String(), "\n")[0]
+	if !isSupportType(version) {
+		logx.Errorf("do not support es version: %s, Only support >= %s", version, es8Version)
+		os.Exit(1)
 	}
 
 	writer := Writer{
@@ -59,39 +83,50 @@ func (w *Writer) Write(index, val string) error {
 }
 
 func (w *Writer) execute(vals []interface{}) {
-	var bulk = w.client.Bulk()
+
+	var buf bytes.Buffer
+
 	for _, val := range vals {
 		pair := val.(valueWithIndex)
-		req := elastic.NewBulkIndexRequest().Index(pair.index)
-		if isSupportType(w.esVersion) && len(w.docType) > 0 {
-			req = req.Type(w.docType)
+
+		m := map[string]map[string]string{
+			"index": {"_index": pair.index},
 		}
-		req = req.Doc(pair.val)
-		bulk.Add(req)
-	}
-	resp, err := bulk.Do(context.Background())
-	if err != nil {
-		logx.Error(err)
-		return
-	}
-
-	// bulk error in docs will report in response items
-	if !resp.Errors {
-		return
-	}
-
-	for _, imap := range resp.Items {
-		for _, item := range imap {
-			if item.Error == nil {
-				continue
-			}
-
-			logx.Error(item.Error)
+		meta, err := json.Marshal(m)
+		if err != nil {
+			logx.Errorf("Cannot encode meta: %v", m)
+			continue
 		}
+
+		data := []byte(pair.val)
+		if err != nil {
+			logx.Errorf("Cannot encode data: %v", data)
+			continue
+		}
+		meta = append(meta, "\n"...)
+		data = append(data, "\n"...)
+
+		buf.Grow(len(meta) + len(data))
+		buf.Write(meta)
+		buf.Write(data)
+	}
+
+	resp, err := w.client.Bulk(
+		bytes.NewReader(buf.Bytes()),
+		w.client.Bulk.WithContext(context.Background()),
+	)
+	logx.Must(err)
+
+	var respMap map[string]interface{}
+	err = json.NewDecoder(resp.Body).Decode(&respMap)
+	logx.Must(err)
+
+	if isErr := respMap["errors"].(bool); isErr {
+		logx.Error(respMap)
 	}
 }
 
 func isSupportType(version string) bool {
 	// es8.x not support type field
-	return semver.Compare(version, es8Version) < 0
+	return semver.Compare(version, es8Version) >= 0
 }

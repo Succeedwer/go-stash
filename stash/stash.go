@@ -2,13 +2,14 @@ package main
 
 import (
 	"flag"
+	"github.com/elastic/go-elasticsearch/v8"
+	"os"
 	"time"
 
 	"github.com/kevwan/go-stash/stash/config"
 	"github.com/kevwan/go-stash/stash/es"
 	"github.com/kevwan/go-stash/stash/filter"
 	"github.com/kevwan/go-stash/stash/handler"
-	"github.com/olivere/elastic/v7"
 	"github.com/zeromicro/go-queue/kq"
 	"github.com/zeromicro/go-zero/core/conf"
 	"github.com/zeromicro/go-zero/core/logx"
@@ -52,11 +53,21 @@ func main() {
 	defer group.Stop()
 
 	for _, processor := range c.Clusters {
-		client, err := elastic.NewClient(
-			elastic.SetSniff(false),
-			elastic.SetURL(processor.Output.ElasticSearch.Hosts...),
-			elastic.SetBasicAuth(processor.Output.ElasticSearch.Username, processor.Output.ElasticSearch.Password),
-		)
+		var cert []byte
+		if processor.Output.ElasticSearch.Certs != "" {
+			var err error
+			cert, err = os.ReadFile(processor.Output.ElasticSearch.Certs)
+			if err != nil {
+				logx.Errorf("ERROR: Unable to  read CA from %q: %s", processor.Output.ElasticSearch.Certs, err)
+			}
+		}
+
+		client, err := elasticsearch.NewClient(elasticsearch.Config{
+			Addresses: processor.Output.ElasticSearch.Hosts,
+			Username:  processor.Output.ElasticSearch.Username,
+			Password:  processor.Output.ElasticSearch.Password,
+			CACert:    cert,
+		})
 		logx.Must(err)
 
 		filters := filter.CreateFilters(processor)

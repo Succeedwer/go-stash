@@ -14,7 +14,7 @@ ADD go.sum .
 RUN go mod download
 COPY . .
 COPY stash/etc /app/etc
-RUN go build -ldflags="-s -w" -o /app/stash stash/stash.go
+RUN go build -ldflags="-s -w" -x -o /app/stash stash/stash.go
 
 
 FROM scratch
